@@ -11,19 +11,21 @@
 #define BUT_PIO_PIN 11
 #define BUT_PIO_PIN_MASK (1 << BUT_PIO_PIN)
 
-#define ECHO_PIO PIOD
-#define ECHO_PIO_ID ID_PIOD
-#define ECHO_PIO_PIN 30
-#define ECHO_PIO_PIN_MASK (1 << ECHO_PIO_PIN)
-
-#define TRIG_PIO PIOC
-#define TRIG_PIO_ID ID_PIOC
+#define TRIG_PIO     PIOC
+#define TRIG_PIO_ID  ID_PIOC
 #define TRIG_PIO_PIN 13
 #define TRIG_PIO_PIN_MASK (1 << TRIG_PIO_PIN)
+
+#define ECHO_PIO     PIOD
+#define ECHO_PIO_ID  ID_PIOD
+#define ECHO_PIO_PIN 30
+#define ECHO_PIO_PIN_MASK (1 << ECHO_PIO_PIN)
 
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+QueueHandle_t xQueueEcho;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
@@ -35,16 +37,14 @@ extern void xPortSysTickHandler(void);
 void but_callback(void);
 void echo_callback(void);
 static void BUT_init(void);
-static void ECHO_init(void);
 static void TRIG_init(void);
+static void ECHO_init(void);
 static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
 
-/**Queue**/
-QueueHandle_t xQueueECHO;
 
-/************************************************************************/
-/* RTOS application funcs                                               */
-/************************************************************************/
+/*************************/
+/* RTOS application funcs*/
+/*************************/
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask, signed char *pcTaskName) {
 	printf("stack overflow %x %s\r\n", pxTask, (portCHAR *)pcTaskName);
@@ -59,44 +59,57 @@ extern void vApplicationMallocFailedHook(void) {
 	configASSERT( ( volatile void * ) NULL );
 }
 
-/************************************************************************/
-/* handlers / callbacks                                                 */
-/************************************************************************/
+/************************/
+/* handlers / callbacks */
+/************************/
 
 void but_callback(void) {
 	pio_set(TRIG_PIO, TRIG_PIO_PIN_MASK);
-	delay_ms(1000);
+	delay_us(10);
 	pio_clear(TRIG_PIO, TRIG_PIO_PIN_MASK);
 }
 
 void echo_callback(void) {
-	if (pio_get(ECHO_PIO, PIO_INPUT, ECHO_PIO_PIN_MASK)) {
-		RTT_init(8621, 0, 0);
-	} else {
-		uint32_t time = rtt_read_timer_value(RTT);
-		xQueueSendFromISR(xQueueECHO, &time, 0);
+	if (pio_get(ECHO_PIO, PIO_INPUT, ECHO_PIO_PIN_MASK)){
+		RTT_init(32000, 0, 0);
+	}
+	else {
+		uint32_t tempo = rtt_read_timer_value(RTT);
+		xQueueSendFromISR(xQueueEcho, &tempo, 0);
 	}
 }
-/************************************************************************/
-/* TASKS                                                                */
-/************************************************************************/
+
+/************************/
+/* TASK                 */
+/************************/
 
 static void task_oled(void *pvParameters) {
+	uint32_t ticks;
+	char str[32];
+	int distancia;
 	gfx_mono_ssd1306_init();
-  gfx_mono_draw_string("Exemplo RTOS", 0, 0, &sysfont);
-  gfx_mono_draw_string("oii", 0, 20, &sysfont);
+	
+	BUT_init();
+	TRIG_init();
+	ECHO_init();
 
 	for (;;)  {
-		if(xQueueReceive(xQueueECHO, &time, 0)) {
-			printf("time: %d\n", time);
+		if (xQueueReceive(xQueueEcho, &ticks, 0)) {
+			double tempo = (double)ticks/32000;
+			distancia = ((tempo * 343)/2)*100;
+			sprintf(str, "%6d", distancia);
+			printf(str);
+			gfx_mono_draw_string(str, 25, 12, &sysfont);
+			gfx_mono_draw_string(" cm", 65, 12, &sysfont);
 		}
-		else
+		
+
 	}
 }
 
-/************************************************************************/
-/* funcoes                                                              */
-/************************************************************************/
+/************************/
+/* funcoes              */
+/************************/
 
 static void configure_console(void) {
 	const usart_serial_options_t uart_serial_options = {
@@ -113,80 +126,85 @@ static void configure_console(void) {
 	setbuf(stdout, NULL);
 }
 
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
+
+	uint16_t pllPreScale = (int) (((float) 32768) / freqPrescale);
+	
+	rtt_sel_source(RTT, false);
+	rtt_init(RTT, pllPreScale);
+	
+	if (rttIRQSource & RTT_MR_ALMIEN) {
+		uint32_t ul_previous_time;
+		ul_previous_time = rtt_read_timer_value(RTT);
+		while (ul_previous_time == rtt_read_timer_value(RTT));
+		rtt_write_alarm_time(RTT, IrqNPulses+ul_previous_time);
+	}
+
+	/* config NVIC */
+	NVIC_DisableIRQ(RTT_IRQn);
+	NVIC_ClearPendingIRQ(RTT_IRQn);
+	NVIC_SetPriority(RTT_IRQn, 4);
+	NVIC_EnableIRQ(RTT_IRQn);
+
+	/* Enable RTT interrupt */
+	if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
+	rtt_enable_interrupt(RTT, rttIRQSource);
+	else
+	rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
+	
+}
+
 static void BUT_init(void) {
+	/* configura prioridae */
 	NVIC_EnableIRQ(BUT_PIO_ID);
 	NVIC_SetPriority(BUT_PIO_ID, 4);
 
+	/* conf botão como entrada */
 	pio_configure(BUT_PIO, PIO_INPUT, BUT_PIO_PIN_MASK, PIO_PULLUP | PIO_DEBOUNCE);
 	pio_set_debounce_filter(BUT_PIO, BUT_PIO_PIN_MASK, 60);
 	pio_enable_interrupt(BUT_PIO, BUT_PIO_PIN_MASK);
 	pio_handler_set(BUT_PIO, BUT_PIO_ID, BUT_PIO_PIN_MASK, PIO_IT_FALL_EDGE , but_callback);
 }
 
+static void TRIG_init(void) {
+	pmc_enable_periph_clk(TRIG_PIO_ID);
+	pio_configure(TRIG_PIO, PIO_OUTPUT_1, TRIG_PIO_PIN_MASK, PIO_DEFAULT);
+}
+
 static void ECHO_init(void) {
+	/* configura prioridae */
 	NVIC_EnableIRQ(ECHO_PIO_ID);
 	NVIC_SetPriority(ECHO_PIO_ID, 4);
 
-	pio_configure(ECHO_PIO, PIO_INPUT, ECHO_PIO_PIN_MASK, PIO_PULLUP | PIO_DEBOUNCE);
-	pio_set_debounce_filter(ECHO_PIO, ECHO_PIO_PIN_MASK, 60);
+	/* conf echo como entrada */
+	pio_configure(ECHO_PIO, PIO_INPUT, ECHO_PIO_PIN_MASK, PIO_DEFAULT);
 	pio_enable_interrupt(ECHO_PIO, ECHO_PIO_PIN_MASK);
-	pio_handler_set(ECHO_PIO, ECHO_PIO_ID, ECHO_PIO_PIN_MASK, PIO_IT_FALL_EDGE , echo_callback);
+	pio_handler_set(ECHO_PIO, ECHO_PIO_ID, ECHO_PIO_PIN_MASK, PIO_IT_EDGE, echo_callback);
 }
 
-static void TRIG_init(void) {
-	pmc_enable_periph_clk(TRIG_PIO_ID);
-	pio_configure(TRIG_PIO, PIO_OUTPUT_0, TRIG_PIO_PIN_MASK, PIO_DEFAULT);
-}
+/************************/
+/* main                 */
+/************************/
 
-static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
 
-  uint16_t pllPreScale = (int) (((float) 32768) / freqPrescale);
-	
-  rtt_sel_source(RTT, false);
-  rtt_init(RTT, pllPreScale);
-  
-  if (rttIRQSource & RTT_MR_ALMIEN) {
-	uint32_t ul_previous_time;
-  	ul_previous_time = rtt_read_timer_value(RTT);
-  	while (ul_previous_time == rtt_read_timer_value(RTT));
-  	rtt_write_alarm_time(RTT, IrqNPulses+ul_previous_time);
-  }
-
-  /* config NVIC */
-  NVIC_DisableIRQ(RTT_IRQn);
-  NVIC_ClearPendingIRQ(RTT_IRQn);
-  NVIC_SetPriority(RTT_IRQn, 4);
-  NVIC_EnableIRQ(RTT_IRQn);
-
-  /* Enable RTT interrupt */
-  if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
-	rtt_enable_interrupt(RTT, rttIRQSource);
-  else
-	rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
-		  
-}
-
-/************************************************************************/
-/* main                                                                 */
-/************************************************************************/
 int main(void) {
-	/* Initialize the SAM system */
 	sysclk_init();
 	board_init();
+	
+	xQueueEcho = xQueueCreate(32, sizeof(uint32_t));
 
 	/* Initialize the console uart */
 	configure_console();
 
 	/* Create task to control oled */
 	if (xTaskCreate(task_oled, "oled", TASK_OLED_STACK_SIZE, NULL, TASK_OLED_STACK_PRIORITY, NULL) != pdPASS) {
-	  printf("Failed to create oled task\r\n");
+		printf("Failed to create oled task\r\n");
 	}
-
 
 	/* Start the scheduler. */
 	vTaskStartScheduler();
 
-  /* RTOS n�o deve chegar aqui !! */
+	/* RTOS não deve chegar aqui !! */
 	while(1){}
 
 	/* Will only get here if there was insufficient memory to create the idle task. */
