@@ -25,6 +25,7 @@
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
 
+SemaphoreHandle_t xSemaphoreEcho;
 QueueHandle_t xQueueEcho;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
@@ -64,9 +65,8 @@ extern void vApplicationMallocFailedHook(void) {
 /************************/
 
 void but_callback(void) {
-	pio_set(TRIG_PIO, TRIG_PIO_PIN_MASK);
-	delay_us(10);
-	pio_clear(TRIG_PIO, TRIG_PIO_PIN_MASK);
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xSemaphoreEcho, &xHigherPriorityTaskWoken);
 }
 
 void echo_callback(void) {
@@ -94,6 +94,11 @@ static void task_oled(void *pvParameters) {
 	ECHO_init();
 
 	for (;;)  {
+		if (xSemaphoreTake(xSemaphoreEcho, (TickType_t) 500) == pdTRUE) {
+			pio_clear(TRIG_PIO, TRIG_PIO_PIN_MASK);
+			delay_us(10);
+			pio_set(TRIG_PIO, TRIG_PIO_PIN_MASK);
+		}
 		if (xQueueReceive(xQueueEcho, &ticks, 0)) {
 			double tempo = (double)ticks/32000;
 			distancia = ((tempo * 343)/2)*100;
@@ -103,7 +108,6 @@ static void task_oled(void *pvParameters) {
 			gfx_mono_draw_string(" cm", 65, 12, &sysfont);
 		}
 		
-
 	}
 }
 
@@ -192,6 +196,10 @@ int main(void) {
 	board_init();
 	
 	xQueueEcho = xQueueCreate(32, sizeof(uint32_t));
+
+	xSemaphoreEcho = xSemaphoreCreateBinary();
+	if (xSemaphoreEcho == NULL)
+   		printf("falha em criar o semaforo \n");
 
 	/* Initialize the console uart */
 	configure_console();
