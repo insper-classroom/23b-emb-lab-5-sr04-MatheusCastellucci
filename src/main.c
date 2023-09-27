@@ -21,11 +21,22 @@
 #define ECHO_PIO_PIN 30
 #define ECHO_PIO_PIN_MASK (1 << ECHO_PIO_PIN)
 
+#define ALARM_PIO     PIOA6
+#define ALARM_PIO_ID  ID_PIOA
+#define ALARM_PIO_PIN 
+#define ALARM_PIO_PIN_MASK (1 << ALARM_PIO_PIN)
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
 
+#define TASK_ALARM_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_ALARM_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
 SemaphoreHandle_t xSemaphoreEcho;
+SemaphoreHandle_t xSemaphoreAlarmEnable;
+SemaphoreHandle_t xSemaphoreAlarmDisable;
+
 QueueHandle_t xQueueEcho;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
@@ -41,6 +52,7 @@ static void BUT_init(void);
 static void TRIG_init(void);
 static void ECHO_init(void);
 static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
+static void ALARM_init(void);
 
 
 /*************************/
@@ -83,6 +95,26 @@ void echo_callback(void) {
 /* TASK                 */
 /************************/
 
+static void task_alarm(void *pvParameters){
+	ALARM_init();
+	char status = 0;
+
+	for (;;) {
+		if (xSemaphoreTake(xSemaphoreAlarmEnable, (TickType_t) 500) == pdTRUE) {
+			status = 1;
+		}
+		if (xSemaphoreTake(xSemaphoreAlarmDisable, (TickType_t) 500) == pdTRUE) {
+			status = 0;
+		}
+		if (status == 1){
+			pio_set(ALARM_PIO, ALARM_PIO_PIN_MASK);
+			vTaskDelay(1000);
+			pio_clear(ALARM_PIO, ALARM_PIO_PIN_MASK);
+			vTaskDelay(1000);
+		}
+	}
+}
+
 static void task_oled(void *pvParameters) {
 	uint32_t ticks;
 	char str[32];
@@ -102,12 +134,19 @@ static void task_oled(void *pvParameters) {
 		if (xQueueReceive(xQueueEcho, &ticks, 0)) {
 			double tempo = (double)ticks/32000;
 			distancia = ((tempo * 343)/2)*100;
+
+			if (distancia >= 2){
+				xSemaphoreGive(xSemaphoreAlarmEnable, &xHigherPriorityTaskWoken);
+			} 
+			else {
+				xSemaphoreGive(xSemaphoreAlarmDisable, &xHigherPriorityTaskWoken);
+			}
+
 			sprintf(str, "%6d", distancia);
 			printf(str);
 			gfx_mono_draw_string(str, 25, 12, &sysfont);
-			gfx_mono_draw_string(" cm", 65, 12, &sysfont);
+			gfx_mono_draw_string(" cm", 65, 12, &sysfont);			
 		}
-		
 	}
 }
 
@@ -186,6 +225,11 @@ static void ECHO_init(void) {
 	pio_handler_set(ECHO_PIO, ECHO_PIO_ID, ECHO_PIO_PIN_MASK, PIO_IT_EDGE, echo_callback);
 }
 
+static void LED_init(void) {
+	pmc_enable_periph_clk(LED_PIO_ID);
+	pio_configure(LED_PIO, PIO_OUTPUT_0, LED_PIO_PIN_MASK, PIO_DEFAULT);
+}
+
 /************************/
 /* main                 */
 /************************/
@@ -201,12 +245,24 @@ int main(void) {
 	if (xSemaphoreEcho == NULL)
    		printf("falha em criar o semaforo \n");
 
+	xSemaphoreAlarmEnable = xSemaphoreCreateBinary();
+	if (xSemaphoreAlarmEnable == NULL)
+   		printf("falha em criar o semaforo \n");
+
+	xSemaphoreAlarmDisable = xSemaphoreCreateBinary();
+	if (xSemaphoreAlarmDisable == NULL)
+   		printf("falha em criar o semaforo \n");
+
 	/* Initialize the console uart */
 	configure_console();
 
 	/* Create task to control oled */
 	if (xTaskCreate(task_oled, "oled", TASK_OLED_STACK_SIZE, NULL, TASK_OLED_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create oled task\r\n");
+	}
+
+	if (xTaskCreate(task_alarm, "alarm", TASK_ALARM_STACK_SIZE, NULL, TASK_ALARM_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create alarm  task\r\n");
 	}
 
 	/* Start the scheduler. */
