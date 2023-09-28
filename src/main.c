@@ -21,9 +21,9 @@
 #define ECHO_PIO_PIN 30
 #define ECHO_PIO_PIN_MASK (1 << ECHO_PIO_PIN)
 
-#define ALARM_PIO     PIOA6
+#define ALARM_PIO     PIOA
 #define ALARM_PIO_ID  ID_PIOA
-#define ALARM_PIO_PIN 
+#define ALARM_PIO_PIN 6
 #define ALARM_PIO_PIN_MASK (1 << ALARM_PIO_PIN)
 
 /** RTOS  */
@@ -98,6 +98,8 @@ void echo_callback(void) {
 static void task_alarm(void *pvParameters){
 	ALARM_init();
 	char status = 0;
+	int freq = 244;
+	int periodo = (1000/(freq))/2;
 
 	for (;;) {
 		if (xSemaphoreTake(xSemaphoreAlarmEnable, (TickType_t) 500) == pdTRUE) {
@@ -108,9 +110,9 @@ static void task_alarm(void *pvParameters){
 		}
 		if (status == 1){
 			pio_set(ALARM_PIO, ALARM_PIO_PIN_MASK);
-			vTaskDelay(1000);
+			delay_ms(periodo);
 			pio_clear(ALARM_PIO, ALARM_PIO_PIN_MASK);
-			vTaskDelay(1000);
+			delay_ms(periodo);
 		}
 	}
 }
@@ -120,6 +122,7 @@ static void task_oled(void *pvParameters) {
 	char str[32];
 	int distancia;
 	gfx_mono_ssd1306_init();
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	
 	BUT_init();
 	TRIG_init();
@@ -127,25 +130,26 @@ static void task_oled(void *pvParameters) {
 
 	for (;;)  {
 		if (xSemaphoreTake(xSemaphoreEcho, (TickType_t) 500) == pdTRUE) {
-			pio_clear(TRIG_PIO, TRIG_PIO_PIN_MASK);
-			delay_us(10);
 			pio_set(TRIG_PIO, TRIG_PIO_PIN_MASK);
-		}
-		if (xQueueReceive(xQueueEcho, &ticks, 0)) {
-			double tempo = (double)ticks/32000;
-			distancia = ((tempo * 343)/2)*100;
+			delay_us(10);
+			pio_clear(TRIG_PIO, TRIG_PIO_PIN_MASK);
+		
+			if (xQueueReceive(xQueueEcho, &ticks, 5000)) {
+				double tempo = (double)ticks/32000;
+				distancia = ((tempo * 343)/2)*100;
 
-			if (distancia >= 2){
-				xSemaphoreGive(xSemaphoreAlarmEnable, &xHigherPriorityTaskWoken);
-			} 
-			else {
-				xSemaphoreGive(xSemaphoreAlarmDisable, &xHigherPriorityTaskWoken);
+				if (distancia >= 200){
+					xSemaphoreGiveFromISR(xSemaphoreAlarmEnable, &xHigherPriorityTaskWoken);
+				} 
+				else {
+					xSemaphoreGiveFromISR(xSemaphoreAlarmDisable, &xHigherPriorityTaskWoken);
+				}
+
+				sprintf(str, "%6d", distancia);
+				printf(str);
+				gfx_mono_draw_string(str, 25, 12, &sysfont);
+				gfx_mono_draw_string(" cm", 65, 12, &sysfont);			
 			}
-
-			sprintf(str, "%6d", distancia);
-			printf(str);
-			gfx_mono_draw_string(str, 25, 12, &sysfont);
-			gfx_mono_draw_string(" cm", 65, 12, &sysfont);			
 		}
 	}
 }
@@ -225,9 +229,9 @@ static void ECHO_init(void) {
 	pio_handler_set(ECHO_PIO, ECHO_PIO_ID, ECHO_PIO_PIN_MASK, PIO_IT_EDGE, echo_callback);
 }
 
-static void LED_init(void) {
-	pmc_enable_periph_clk(LED_PIO_ID);
-	pio_configure(LED_PIO, PIO_OUTPUT_0, LED_PIO_PIN_MASK, PIO_DEFAULT);
+static void ALARM_init(void) {
+	pmc_enable_periph_clk(ALARM_PIO_ID);
+	pio_set_output(ALARM_PIO, ALARM_PIO_PIN_MASK, 0, 0, 0);
 }
 
 /************************/
